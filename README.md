@@ -52,8 +52,4 @@ This will automatically:
 *   `~/.ollama_pro_data.json`: Local database storing your multi-session chat history and parameters.
 *   `~/Desktop/Ollama-Pro.desktop`: Official Linux desktop entry for quick access.
 
-## 💡 Pro Tips for Hardware
-
-*   **RTX 2050 (4GB)**: For best performance in **Split View**, use lightweight models like `llama3.2:1b` or `phi3:mini`.
-*   **VRAM Management**: Monitor the VRAM gauge in the Engine Room when switching models to avoid "Out of Memory" errors.
 # Ollama-Pro-App
