@@ -28,6 +28,23 @@ You can launch the app directly using the **Ollama Pro** icon on your desktop (c
 ~/.ollama_pro_env/bin/python ~/ollama_pro.py
 ```
 
+## 🚀 One-Click Install for Linux
+
+To install **Ollama Pro** and its system dependencies on any Linux machine, run these commands in your terminal:
+
+```bash
+git clone https://github.com/Manu-Sekhon/Ollama-Pro-App.git
+cd Ollama-Pro-App
+chmod +x install.sh
+./install.sh
+```
+
+This will automatically:
+1.  Install required system libraries (`portaudio`, `alsa`).
+2.  Set up a local Python virtual environment.
+3.  Install all Python dependencies.
+4.  Create an **Ollama Pro** shortcut on your Desktop and in your Application Menu.
+
 ## 📁 Project Structure
 
 *   `ollama_pro.py`: Core application source code.
