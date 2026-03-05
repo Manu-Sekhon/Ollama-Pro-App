@@ -102,6 +102,14 @@ class ChatBubble(ctk.CTkFrame):
         self.text_display.insert("1.0", content)
         self.text_display.configure(state="disabled")
         
+        # Linux Mousewheel Fix
+        self.text_display.bind("<Button-4>", lambda e: self.master._parent_canvas.yview_scroll(-1, "units"))
+        self.text_display.bind("<Button-5>", lambda e: self.master._parent_canvas.yview_scroll(1, "units"))
+        self.container.bind("<Button-4>", lambda e: self.master._parent_canvas.yview_scroll(-1, "units"))
+        self.container.bind("<Button-5>", lambda e: self.master._parent_canvas.yview_scroll(1, "units"))
+        self.bind("<Button-4>", lambda e: self.master._parent_canvas.yview_scroll(-1, "units"))
+        self.bind("<Button-5>", lambda e: self.master._parent_canvas.yview_scroll(1, "units"))
+        
         # Initial height sync
         self.after(50, self.adjust_height)
 
@@ -155,6 +163,7 @@ class OllamaProApp(ctk.CTk):
         threading.Thread(target=self.hw_monitor.run, daemon=True).start()
         
         self.load_models()
+        self.check_and_start_ollama()
         self.after(500, self.render_history_sidebar)
 
     def load_data(self):
@@ -169,10 +178,20 @@ class OllamaProApp(ctk.CTk):
                             self.sessions = [{"id": str(time.time()), "title": "Legacy Session", "messages": data["history"]}]
                     elif "sessions" in data:
                         self.sessions = data.get("sessions", [])
+                
+                # CLEANUP: Remove any sessions that have no messages
+                self.sessions = [s for s in self.sessions if s.get("messages") and len(s["messages"]) > 0]
             except: self.sessions = []
 
     def save_data(self):
-        data = {"sessions": self.sessions}
+        # Only save sessions that actually have content to keep history clean
+        active_sessions = [s for s in self.sessions if s.get("messages") and len(s["messages"]) > 0]
+        # Include current session even if empty, so it persists while the app is open
+        current = next((s for s in self.sessions if s["id"] == self.current_session_id), None)
+        if current and current not in active_sessions:
+            active_sessions.append(current)
+
+        data = {"sessions": active_sessions}
         with open(DATA_FILE, "w") as f:
             json.dump(data, f, indent=4)
 
@@ -184,12 +203,26 @@ class OllamaProApp(ctk.CTk):
             self.start_new_chat()
 
     def start_new_chat(self):
-        self.current_session_id = str(time.time())
-        self.sessions.append({
-            "id": self.current_session_id,
-            "title": "New Chat",
-            "messages": []
-        })
+        # Check if current session is already empty, if so, just clear canvas and stay on it
+        if self.current_session_id:
+            current = next((s for s in self.sessions if s["id"] == self.current_session_id), None)
+            if current and not current["messages"]:
+                self.clear_canvas()
+                self.render_history_sidebar()
+                return
+
+        # Check if there is ANY empty session in the list to reuse
+        empty_session = next((s for s in self.sessions if not s["messages"]), None)
+        if empty_session:
+            self.current_session_id = empty_session["id"]
+        else:
+            self.current_session_id = str(time.time())
+            self.sessions.append({
+                "id": self.current_session_id,
+                "title": "New Chat",
+                "messages": []
+            })
+        
         self.save_data()
         self.clear_canvas()
         self.render_history_sidebar()
@@ -208,6 +241,7 @@ class OllamaProApp(ctk.CTk):
         for session in reversed(self.sessions): # Newest first
             item_frame = ctk.CTkFrame(self.history_scroll, fg_color="transparent")
             item_frame.pack(fill="x", pady=2)
+            self.scroll_fix(item_frame, self.history_scroll)
             
             # Session Select Button
             is_active = session["id"] == self.current_session_id
@@ -218,6 +252,7 @@ class OllamaProApp(ctk.CTk):
                                 text_color=COLORS["text_main"], height=32,
                                 command=lambda s=session: self.load_session(s["id"]))
             btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+            self.scroll_fix(btn, self.history_scroll)
             
             # Individual Delete Button
             del_btn = ctk.CTkButton(item_frame, text="✕", width=28, height=28,
@@ -225,6 +260,12 @@ class OllamaProApp(ctk.CTk):
                                     text_color=COLORS["text_dim"],
                                     command=lambda s=session: self.delete_session(s["id"]))
             del_btn.pack(side="right")
+            self.scroll_fix(del_btn, self.history_scroll)
+
+    def scroll_fix(self, widget, scrollable_frame):
+        # Explicit Linux mousewheel support
+        widget.bind("<Button-4>", lambda e: scrollable_frame._parent_canvas.yview_scroll(-1, "units"))
+        widget.bind("<Button-5>", lambda e: scrollable_frame._parent_canvas.yview_scroll(1, "units"))
 
     def delete_session(self, session_id):
         self.sessions = [s for s in self.sessions if s["id"] != session_id]
@@ -247,6 +288,261 @@ class OllamaProApp(ctk.CTk):
             for msg in session["messages"]:
                 ChatBubble(self.chat_frame_1._scroll_area, msg["role"], msg["content"], 
                            model_name=msg.get("model", ""), color=msg.get("color"))
+
+    def check_and_start_ollama(self):
+        def check():
+            try:
+                requests.get(f"{self.api_base}/tags", timeout=2)
+                return True
+            except:
+                return False
+
+        import shutil
+        if not shutil.which("ollama"):
+            from tkinter import messagebox
+            if messagebox.askyesno("Ollama Not Found", "Ollama is not installed. Would you like to install it now?\n(Requires curl and sudo)"):
+                self.install_ollama()
+                return
+
+        if not check():
+            # Try to start ollama
+            try:
+                import subprocess
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(5):
+                    time.sleep(2)
+                    if check():
+                        self.after(0, self.load_models)
+                        return
+            except Exception as e:
+                print(f"Failed to start Ollama: {e}")
+
+    def install_ollama(self):
+        progress_window = ctk.CTkToplevel(self)
+        progress_window.title("Installing Ollama")
+        progress_window.geometry("500x200")
+        progress_window.attributes("-topmost", True)
+        
+        lbl = ctk.CTkLabel(progress_window, text="Installing Ollama via official script...", pady=20)
+        lbl.pack()
+        
+        log_box = ctk.CTkTextbox(progress_window, height=100, width=450, font=ctk.CTkFont(size=10))
+        log_box.pack(padx=10, pady=10)
+
+        def run_install():
+            import subprocess
+            try:
+                # Use a shell command to pipe curl into sh
+                process = subprocess.Popen(
+                    "curl -fsSL https://ollama.com/install.sh | sh",
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True
+                )
+                for line in process.stdout:
+                    self.after(0, lambda l=line: [log_box.insert("end", l), log_box.see("end")])
+                
+                process.wait()
+                if process.returncode == 0:
+                    self.after(0, lambda: [lbl.configure(text="Installation Complete! Restarting Ollama..."), self.check_and_start_ollama()])
+                else:
+                    self.after(0, lambda: lbl.configure(text="Installation Failed. Please check logs.", text_color=COLORS["error"]))
+            except Exception as e:
+                self.after(0, lambda: lbl.configure(text=f"Error: {e}", text_color=COLORS["error"]))
+
+        threading.Thread(target=run_install, daemon=True).start()
+
+    def show_download_list(self):
+        list_window = ctk.CTkToplevel(self)
+        list_window.title("Model Explorer & Downloader")
+        list_window.geometry("650x850")
+        list_window.attributes("-topmost", True)
+        
+        # Get Current Hardware Capabilities
+        stats = self.hw_monitor.get_stats()
+        vram = stats.get("vram_t", 0) 
+        ram = stats.get("ram_t", 0)   
+        
+        # Extended Model Catalog
+        self.full_catalog = [
+            {"name": "Llama 3.2 1B", "tag": "llama3.2:1b", "params": "1.2B", "size": "1.3 GB", "vram": 1.5, "desc": "Ultra-lightweight, perfect for mobile/edge hardware."},
+            {"name": "Llama 3.2 3B", "tag": "llama3.2", "params": "3.2B", "size": "2.0 GB", "vram": 3.0, "desc": "Balanced performance for everyday tasks."},
+            {"name": "Llama 3.1 8B", "tag": "llama3.1", "params": "8.0B", "size": "4.7 GB", "vram": 6.5, "desc": "Industry standard for general reasoning."},
+            {"name": "Phi-3 Mini", "tag": "phi3", "params": "3.8B", "size": "2.3 GB", "vram": 3.5, "desc": "Microsoft's high-efficiency small language model."},
+            {"name": "Gemma 2 2B", "tag": "gemma2:2b", "params": "2.6B", "size": "1.6 GB", "vram": 2.5, "desc": "Google's lightweight model with great logic."},
+            {"name": "Gemma 2 9B", "tag": "gemma2", "params": "9.2B", "size": "5.4 GB", "vram": 8.0, "desc": "Powerful reasoning with Google's latest architecture."},
+            {"name": "Mistral 7B v0.3", "tag": "mistral", "params": "7.3B", "size": "4.1 GB", "vram": 5.5, "desc": "Classic reliable model for diverse tasks."},
+            {"name": "DeepSeek Coder V2", "tag": "deepseek-coder-v2", "params": "16B", "size": "8.9 GB", "vram": 11.0, "desc": "Expert at programming and technical logic."},
+            {"name": "Codellama 7B", "tag": "codellama", "params": "7B", "size": "3.8 GB", "vram": 5.0, "desc": "Meta's specialized coding assistant."},
+            {"name": "Qwen2 1.5B", "tag": "qwen2:1.5b", "params": "1.5B", "size": "934 MB", "vram": 1.2, "desc": "Alibaba's extremely efficient small model."},
+            {"name": "Qwen2 7B", "tag": "qwen2", "params": "7.2B", "size": "4.4 GB", "vram": 6.0, "desc": "High-performance model with broad knowledge."},
+            {"name": "Orca Mini 3B", "tag": "orca-mini", "params": "3B", "size": "2.0 GB", "vram": 2.8, "desc": "Fine-tuned for instructional following."},
+            {"name": "Neural Chat 7B", "tag": "neural-chat", "params": "7B", "size": "4.1 GB", "vram": 5.5, "desc": "Optimized for natural conversation flows."},
+            {"name": "Starcoder2 3B", "tag": "starcoder2:3b", "params": "3B", "size": "1.7 GB", "vram": 2.5, "desc": "Specialized in code generation and review."},
+            {"name": "TinyLlama 1.1B", "tag": "tinyllama", "params": "1.1B", "size": "637 MB", "vram": 1.0, "desc": "Extreme efficiency for simple logic tasks."}
+        ]
+
+        # --- UI Header & Search ---
+        header = ctk.CTkFrame(list_window, fg_color="transparent")
+        header.pack(fill="x", pady=(20, 10), padx=20)
+        
+        title_lbl = ctk.CTkLabel(header, text="OLLAMA MODEL HUB", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["accent"])
+        title_lbl.pack(anchor="w")
+        
+        hw_info = f"SYSTEM PROFILE: {vram:.1f}GB VRAM | {ram:.1f}GB RAM"
+        ctk.CTkLabel(header, text=hw_info, font=ctk.CTkFont(size=12), text_color=COLORS["text_dim"]).pack(anchor="w")
+
+        search_frame = ctk.CTkFrame(list_window, fg_color=COLORS["sidebar"], height=45, corner_radius=10)
+        search_frame.pack(fill="x", padx=20, pady=10)
+        
+        self.search_entry = ctk.CTkEntry(search_frame, placeholder_text="Search models (e.g. 'llama', 'code', '3b')...", 
+                                        fg_color="transparent", border_width=0, font=ctk.CTkFont(size=14))
+        self.search_entry.pack(side="left", fill="both", expand=True, padx=15)
+        self.search_entry.bind("<KeyRelease>", lambda e: self.filter_models())
+
+        # --- Scrollable Area ---
+        self.model_scroll = ctk.CTkScrollableFrame(list_window, fg_color="transparent")
+        self.model_scroll.pack(fill="both", expand=True, padx=15, pady=5)
+        
+        # Initial Render
+        self.filter_models(vram, ram)
+
+    def filter_models(self, vram=None, ram=None):
+        # Fallback to current hardware if not provided
+        if vram is None:
+            stats = self.hw_monitor.get_stats()
+            vram = stats.get("vram_t", 0)
+            ram = stats.get("ram_t", 0)
+
+        query = self.search_entry.get().lower()
+        
+        # Clear current list
+        for widget in self.model_scroll.winfo_children():
+            widget.destroy()
+            
+        for m in self.full_catalog:
+            if query in m["name"].lower() or query in m["tag"].lower() or query in m["desc"].lower():
+                self.render_model_item(m, vram, ram)
+
+    def render_model_item(self, m, vram, ram):
+        # Recommendation Logic: 
+        # 1. Fits in VRAM (primary)
+        # 2. Fits in RAM (if no VRAM available)
+        # 3. Leave at least 1GB buffer
+        is_installed = m["tag"] in self.available_models or f"{m['tag']}:latest" in self.available_models
+        
+        can_run_gpu = vram > (m["vram"] + 0.5)
+        can_run_cpu = ram > (m["vram"] * 1.5 + 2.0)
+        is_recommended = (can_run_gpu or (vram < 1.0 and can_run_cpu)) and not is_installed
+        
+        frame = ctk.CTkFrame(self.model_scroll, fg_color=COLORS["sidebar"], border_width=1, 
+                            border_color=COLORS["accent"] if is_recommended else COLORS["border"])
+        frame.pack(fill="x", pady=6, padx=5)
+        self.scroll_fix(frame, self.model_scroll)
+        
+        info_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        info_frame.pack(side="left", padx=15, pady=12, fill="both", expand=True)
+        self.scroll_fix(info_frame, self.model_scroll)
+        
+        # Title Row
+        title_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
+        title_frame.pack(fill="x")
+        self.scroll_fix(title_frame, self.model_scroll)
+        
+        name_lbl = ctk.CTkLabel(title_frame, text=m["name"] + ("  ✔" if is_installed else ""), 
+                               font=ctk.CTkFont(size=15, weight="bold"), 
+                               text_color=COLORS["success"] if is_installed else COLORS["text_main"])
+        name_lbl.pack(side="left")
+        self.scroll_fix(name_lbl, self.model_scroll)
+        
+        if is_recommended:
+            badge = ctk.CTkLabel(title_frame, text=" RECOMMENDATION ", fg_color=COLORS["success"], 
+                                text_color="white", font=ctk.CTkFont(size=9, weight="bold"), corner_radius=4)
+            badge.pack(side="left", padx=10)
+            self.scroll_fix(badge, self.model_scroll)
+
+        # Meta Row
+        meta_text = f"PARAMS: {m['params']} | SIZE: {m['size']} | REQUIRES ~{m['vram']}GB VRAM"
+        meta_lbl = ctk.CTkLabel(info_frame, text=meta_text, font=ctk.CTkFont(size=11), text_color=COLORS["accent"])
+        meta_lbl.pack(anchor="w", pady=(2, 0))
+        self.scroll_fix(meta_lbl, self.model_scroll)
+        
+        # Desc Row
+        desc_lbl = ctk.CTkLabel(info_frame, text=m["desc"], font=ctk.CTkFont(size=11, slant="italic"), 
+                    text_color=COLORS["text_dim"], wraplength=350, justify="left")
+        desc_lbl.pack(anchor="w", pady=(2, 0))
+        self.scroll_fix(desc_lbl, self.model_scroll)
+
+        # Action Button
+        btn_text = "RE-DOWNLOAD" if is_installed else "DOWNLOAD"
+        btn_fg = "transparent" if is_installed else (COLORS["accent"] if is_recommended else "transparent")
+        
+        dl_btn = ctk.CTkButton(frame, text=btn_text, width=110, height=32,
+                               fg_color=btn_fg, border_width=1, border_color=COLORS["accent"] if not is_installed else COLORS["border"],
+                               text_color=COLORS["bg_dark"] if is_recommended else COLORS["accent"],
+                               command=lambda t=m["tag"]: self.start_model_download(t))
+        dl_btn.pack(side="right", padx=15)
+        self.scroll_fix(dl_btn, self.model_scroll)
+
+    def download_model_dialog(self):
+        self.show_download_list()
+
+    def start_model_download(self, model_name):
+        if not model_name: return
+        progress_window = ctk.CTkToplevel(self)
+        progress_window.title(f"Downloading {model_name}")
+        progress_window.geometry("400x150")
+        progress_window.attributes("-topmost", True)
+        
+        lbl = ctk.CTkLabel(progress_window, text=f"Pulling {model_name}...", pady=20)
+        lbl.pack()
+        
+        progress = ctk.CTkProgressBar(progress_window, width=300)
+        progress.pack(pady=10)
+        progress.set(0)
+        
+        status_lbl = ctk.CTkLabel(progress_window, text="Initializing...", font=ctk.CTkFont(size=10))
+        status_lbl.pack()
+
+        def pull():
+            try:
+                # Use a session to avoid timeout issues with large model downloads
+                session = requests.Session()
+                print(f"Starting pull for: {model_name}")
+                r = session.post(f"{self.api_base}/pull", json={"name": model_name}, stream=True)
+                
+                if r.status_code != 200:
+                    error_msg = f"HTTP Error: {r.status_code}"
+                    try:
+                        error_msg += f" - {r.json().get('error', '')}"
+                    except: pass
+                    self.after(0, lambda: status_lbl.configure(text=error_msg, text_color=COLORS["error"]))
+                    return
+
+                for line in r.iter_lines():
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if "error" in data:
+                                self.after(0, lambda e=data["error"]: status_lbl.configure(text=f"Error: {e}", text_color=COLORS["error"]))
+                                return
+                                
+                            if "completed" in data and "total" in data:
+                                p = data["completed"] / data["total"]
+                                self.after(0, lambda v=p: progress.set(v))
+                                self.after(0, lambda v=p: status_lbl.configure(text=f"{int(v*100)}% completed"))
+                            elif "status" in data:
+                                self.after(0, lambda s=data["status"]: status_lbl.configure(text=s))
+                        except json.JSONDecodeError:
+                            continue
+                
+                self.after(0, lambda: [progress_window.destroy(), self.load_models()])
+            except Exception as e:
+                print(f"Pull Error: {e}")
+                self.after(0, lambda: status_lbl.configure(text=f"Error: {e}", text_color=COLORS["error"]))
+
+        threading.Thread(target=pull, daemon=True).start()
 
     def setup_ui(self):
         # LEFT PANEL
@@ -345,6 +641,19 @@ class OllamaProApp(ctk.CTk):
         self.temp_slider = self.create_parameter("Temperature", 0, 1, 0.7)
         self.ctx_slider = self.create_parameter("Context Window", 2048, 32768, 4096, is_int=True)
         self.top_p_slider = self.create_parameter("Top P", 0, 1, 0.9)
+
+        ctk.CTkLabel(self.right_panel, text="MODEL MANAGEMENT", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLORS["text_dim"]).pack(padx=20, anchor="w", pady=(30, 10))
+        self.download_btn = ctk.CTkButton(self.right_panel, text="📥 DOWNLOAD MODEL", 
+                                          fg_color="transparent", border_width=1, border_color=COLORS["accent"],
+                                          hover_color=COLORS["border"], text_color=COLORS["accent"],
+                                          command=self.download_model_dialog)
+        self.download_btn.pack(fill="x", padx=20, pady=5)
+
+        self.refresh_btn = ctk.CTkButton(self.right_panel, text="🔄 REFRESH MODELS", 
+                                         fg_color="transparent", border_width=1, border_color=COLORS["border"],
+                                         hover_color=COLORS["border"], text_color=COLORS["text_main"],
+                                         command=self.load_models)
+        self.refresh_btn.pack(fill="x", padx=20, pady=5)
 
     def handle_return(self, event):
         if not event.state & 0x1: # No Shift
