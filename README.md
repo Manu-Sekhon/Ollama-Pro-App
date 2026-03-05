@@ -46,6 +46,6 @@ chmod +x install.sh
 
 ## 💡 Hardware Optimization
 
-The app is optimized for mid-range GPUs (like the RTX 2050 4GB). It will prioritize:
+The app is optimized for mid-range GPUs. It will prioritize:
 1.  **VRAM-Fit**: Models that fit entirely in your GPU memory for maximum speed.
 2.  **RAM-Fallback**: If no GPU is detected, it suggests models based on system RAM availability.
